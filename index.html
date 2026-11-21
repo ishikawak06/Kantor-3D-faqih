@@ -17,6 +17,9 @@ create policy "open" on tasks for all using (true) with check (true);
 create policy "open" on settings for all using (true) with check (true);
 create policy "open" on logs for all using (true) with check (true);
 
+create table yt_stats(id bigserial primary key, name text, subs bigint, views bigint, videos int, latest_id text, latest_title text, latest_views bigint, latest_likes bigint, latest_comments bigint, created_at timestamptz default now());
+alter table yt_stats enable row level security; create policy "open" on yt_stats for all using (true) with check (true);
+
 PERINGATAN: policy "open" membuat siapa pun yang punya URL halaman ini bisa membaca API key di tabel agents. Pakai repo private / Supabase Auth sebelum dipakai serius.
 -->
 <style>
@@ -62,8 +65,13 @@ button:hover{filter:brightness(1.1)}button:focus-visible,input:focus-visible,sel
 
 <h2>Manager (Gemini)</h2>
 <input id="gk" type="password" placeholder="Gemini API key">
-<div class="row"><input id="iv" type="number" min="20" placeholder="Interval cek (detik)"><button id="sv">Simpan</button></div>
-<div class="row"><button id="now" title="Mengirim 1 pesan tes ke setiap agen">Tes semua agen</button><button id="wl">Jaga layar menyala</button></div>
+<h2>Manager YouTube</h2>
+<input id="yk" type="password" placeholder="YouTube Data API key">
+<input id="yc" placeholder="Channel: @namakamu atau ID UC...">
+<small id="ys" style="display:block;color:var(--mu);margin:2px 0 8px"></small>
+<div class="row"><input id="iv" type="number" min="20" placeholder="Interval cek agen (detik)"><button id="sv">Simpan</button></div>
+<div class="row"><button id="now" title="Mengirim 1 pesan tes ke setiap agen">Tes semua agen</button><button id="ynow">Cek YouTube</button></div>
+<div class="row"><button id="wl">Jaga layar menyala</button></div>
 <div id="lg"></div>
 </aside>
 
@@ -100,7 +108,12 @@ function classify(r,j){
   const m=j.error?.message||'';
   if(r.ok)return{st:'active',reset:null,err:null};
   if(r.status===401)return{st:'invalid',reset:null,err:m||'API key ditolak'};
-  if(r.status===429||/limit|quota|credit|exceeded/i.test(m)){const ra=+r.headers.get('retry-after');return{st:'limited',reset:new Date(Date.now()+(ra?ra*1000:3600e3)).toISOString(),err:m||'Jatah pesan habis'}}
+  if(r.status===429||/limit|quota|credit|exceeded/i.test(m)){
+    let ms=(+r.headers.get('retry-after'))*1000||0;
+    const u=m.match(/until\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+    if(u){let h=+u[1]%12+(/pm/i.test(u[3]||'')?12:0);if(!u[3])h=+u[1];const d=new Date();d.setHours(h,+u[2],0,0);if(d<=new Date())d.setDate(d.getDate()+1);ms=d-Date.now()}
+    if(!ms)ms=/credit balance/i.test(m)?6*3600e3:3600e3;
+    return{st:'limited',reset:new Date(Date.now()+ms).toISOString(),err:m||'Jatah pesan habis'}}
   return{st:'error',reset:null,err:m||('HTTP '+r.status)};
 }
 async function setStatus(a,c){
@@ -158,10 +171,12 @@ const CL={active:'#1f9d6b',limited:'#7a6bd8',invalid:'#d64545',error:'#d64545',u
 function render(){
   const n=v=>A.filter(a=>vis(a)===v).length;
   $('#sum').textContent=`${A.length} agen: ${n('work')} bekerja, ${n('idle')} santai, ${n('sleep')} tidur`;
-  $('#al').innerHTML=A.map(a=>`<div class="r"><i style="background:${CL[a.status]||'#999'}"></i><div><b>${esc(a.name)}</b><small>${esc(a.model)}, ${LB[vis(a)]}${a.status==='limited'&&a.reset_at?', pulih '+new Date(a.reset_at).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}):''}${a.error&&a.status!=='active'?'<br>'+esc(a.error.slice(0,90)):''}</small></div><button data-d="${a.id}" title="Hapus agen">✕</button></div>`).join('')||'<small>Belum ada agen. Tambahkan API key Claude di bawah.</small>';
+  $('#al').innerHTML=A.map(a=>`<div class="r"><i style="background:${CL[a.status]||'#999'}"></i><div><b>${esc(a.name)}</b><small>${esc(a.model)}, ${LB[vis(a)]}${a.status==='limited'&&a.reset_at&&!/credit balance/i.test(a.error||'')?', pulih '+new Date(a.reset_at).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}):''}${a.error&&a.status!=='active'?'<br>'+esc(a.error.slice(0,90)):''}</small></div><button data-d="${a.id}" title="Hapus agen">✕</button></div>`).join('')||'<small>Belum ada agen. Tambahkan API key Claude di bawah.</small>';
   $('#tl').innerHTML=T.slice(0,8).map(t=>`<div class="r"><i style="background:${t.status==='done'?'#1f9d6b':t.status==='running'?'#e0a21b':'#999'}"></i><div><b>${esc(t.title)}</b><small>${t.status}${t.result?': '+esc(t.result.slice(0,110)):''}</small></div><button data-t="${t.id}" title="Hapus tugas">✕</button></div>`).join('')||'<small>Belum ada tugas. Agen tanpa tugas akan bersantai di lantai 2.</small>';
   $('#lg').innerHTML=L.map(l=>`<div>${new Date(l.created_at).toLocaleTimeString('id-ID')} ${esc(l.msg)}</div>`).join('');
   if(document.activeElement!==$('#gk'))$('#gk').value=S.gemini_key||'';
+  if(document.activeElement!==$('#yk'))$('#yk').value=S.yt_key||'';
+  if(document.activeElement!==$('#yc'))$('#yc').value=S.yt_channel||'';
   if(document.activeElement!==$('#iv'))$('#iv').value=S.interval||60;
 }
 $('#p').addEventListener('click',async e=>{
@@ -179,9 +194,10 @@ $('#ta').onclick=async()=>{
   await db('tasks',{method:'POST',body:JSON.stringify({title:$('#tt').value.trim()})});$('#tt').value='';await load();tick();
 };
 $('#sv').onclick=async()=>{
-  await db('settings?on_conflict=key',{method:'POST',headers:{Prefer:'resolution=merge-duplicates'},body:JSON.stringify([{key:'gemini_key',value:$('#gk').value.trim()},{key:'interval',value:String(Math.max(20,+$('#iv').value||60))}])});
-  await load();
+  await db('settings?on_conflict=key',{method:'POST',headers:{Prefer:'resolution=merge-duplicates'},body:JSON.stringify([{key:'gemini_key',value:$('#gk').value.trim()},{key:'interval',value:String(Math.max(20,+$('#iv').value||60))},{key:'yt_key',value:$('#yk').value.trim()},{key:'yt_channel',value:$('#yc').value.trim()}])});
+  await load();ytTick();
 };
+$('#ynow').onclick=ytTick;
 $('#now').onclick=()=>tick(true);
 $('#wl').onclick=async()=>{try{window._wl=await navigator.wakeLock.request('screen');$('#wl').textContent='Layar dijaga menyala'}catch(e){$('#wl').textContent='Tidak didukung'}};
 
@@ -203,6 +219,54 @@ for(let i=0;i<8;i++){const x=-9+(i%4)*6,z=i<4?-3.5:3;desks.push({x,z:z+1.5});
 box(F2,5,.8,1.4,0xb05a7a,-8,.4,5);box(F2,5,.9,.4,0xa04d6c,-8,.9,5.6);box(F2,4,2,.2,0x222,-8,1.8,-7.5);box(F2,3.6,1.7,.05,0x3b6fd8,-8,1.8,-7.38);box(F2,2,.5,1,0x9a7b5a,-8,.25,1.5);
 for(let i=0;i<8;i++){const x=1.5+(i%4)*2.3,z=i<4?-3.8:3.5;box(F2,1.8,.5,3.6,0xf4f4f8,x,.25,z);box(F2,1.4,.2,.6,0xbcd,x,.6,z-1.4)}
 const stair=box(sc,2,.3,Math.sqrt(144+H*H),0x8896b3,11.8,H/2,0);stair.rotation.x=Math.atan(H/12);
+/* ---------- Manager YouTube ---------- */
+let Y=null,YE='';
+box(F1,3.6,1,.8,0x7a5f44,0,.55,-7.2);box(F1,4,.2,1,0x9a7b5a,0,1.1,-7.2);
+const ytc=document.createElement('canvas');ytc.width=512;ytc.height=184;const ytt=new THREE.CanvasTexture(ytc);
+const ytm=new THREE.Mesh(new THREE.PlaneGeometry(5,1.8),new THREE.MeshBasicMaterial({map:ytt}));ytm.position.set(0,1.95,-7.8);F1.add(ytm);
+const fm=n=>n==null?'-':Number(n).toLocaleString('id-ID');
+function drawYT(){
+  const x=ytc.getContext('2d');x.fillStyle='#161a2b';x.fillRect(0,0,512,184);x.fillStyle='#e8ebf7';x.font='bold 26px sans-serif';
+  if(!Y)x.fillText(YE?'Error: '+YE.slice(0,32):'YouTube belum diatur',16,60);
+  else{
+    x.fillText(Y.name.slice(0,28),16,36);x.font='22px sans-serif';
+    x.fillText('Subscriber '+fm(Y.subs)+(Y.ds?' ('+(Y.ds>0?'+':'')+Y.ds+')':''),16,74);
+    x.fillText('Total views '+fm(Y.views)+'  |  Video '+fm(Y.videos),16,104);
+    x.fillStyle='#9fb0ff';x.fillText('Terbaru: '+(Y.latest_title||'-').slice(0,36),16,140);
+    x.fillText(fm(Y.latest_views)+' views, '+fm(Y.latest_likes)+' suka, '+fm(Y.latest_comments)+' komentar',16,170);
+  }
+  ytt.needsUpdate=true;
+  $('#ys').textContent=YE?'Error: '+YE:Y?`${Y.name}: ${fm(Y.subs)} subscriber, ${fm(Y.views)} views, ${fm(Y.videos)} video`:'Isi API key YouTube dan channel, lalu Simpan.';
+}
+async function yt(path){
+  const r=await fetch('https://www.googleapis.com/youtube/v3/'+path+'&key='+encodeURIComponent(S.yt_key)),j=await r.json();
+  if(!r.ok)throw new Error(j.error?.message||('HTTP '+r.status));return j;
+}
+async function ytTick(){
+  if(!S.yt_key||!S.yt_channel){drawYT();return}
+  try{
+    const q=S.yt_channel.startsWith('@')?'forHandle='+encodeURIComponent(S.yt_channel):'id='+encodeURIComponent(S.yt_channel);
+    const c=(await yt('channels?part=snippet,statistics,contentDetails&'+q)).items?.[0];
+    if(!c)throw new Error('Channel tidak ditemukan');
+    const pl=(await yt('playlistItems?part=contentDetails&maxResults=1&playlistId='+c.contentDetails.relatedPlaylists.uploads)).items?.[0];
+    const v=pl?(await yt('videos?part=snippet,statistics&id='+pl.contentDetails.videoId)).items?.[0]:null;
+    const row={name:c.snippet.title,subs:+c.statistics.subscriberCount||0,views:+c.statistics.viewCount||0,videos:+c.statistics.videoCount||0,latest_id:v?.id||null,latest_title:v?.snippet.title||null,latest_views:+v?.statistics.viewCount||0,latest_likes:+v?.statistics.likeCount||0,latest_comments:+v?.statistics.commentCount||0};
+    const pv=(await db('yt_stats?select=*&order=id.desc&limit=1'))[0];
+    await db('yt_stats',{method:'POST',body:JSON.stringify(row)});
+    const ch=[];
+    if(pv){
+      if(row.subs!==pv.subs)ch.push(`subscriber ${pv.subs} jadi ${row.subs}`);
+      if(row.latest_id!==pv.latest_id)ch.push('video baru: '+row.latest_title);
+      else if(row.latest_comments>pv.latest_comments)ch.push(`komentar baru +${row.latest_comments-pv.latest_comments} di video terbaru`);
+    }
+    ch.forEach(x=>log('YT: '+x));
+    if(ch.length&&S.gemini_key){try{const o=await gemini(`Kamu manager YouTube di kantor AI. Perubahan channel: ${ch.join('; ')}. Statistik: ${JSON.stringify(row)}. Balas JSON {"comment":"satu kalimat laporan singkat bahasa Indonesia"}`);if(o.comment)log('YT Manager: '+o.comment)}catch(e){}}
+    Y={...row,ds:pv?row.subs-pv.subs:0};YE='';
+  }catch(e){YE=String(e.message||e).slice(0,100)}
+  drawYT();sync();
+}
+drawYT();
+
 const spot={work:i=>new THREE.Vector3(desks[i%8].x,0,desks[i%8].z),idle:i=>new THREE.Vector3(-11+(i%4)*2.4,H,i%8<4?-2.5:.5),sleep:i=>new THREE.Vector3(1.5+(i%4)*2.3,H+.5,(i%8)<4?-3.8:3.5)};
 const SBOT=new THREE.Vector3(11.8,0,6.5),STOP=new THREE.Vector3(11.8,H,-6.3);
 const mat=c=>new THREE.MeshLambertMaterial({color:c});
@@ -236,7 +300,12 @@ function sync(){
       p.push(tgt);c.path=p;
     }
   });
-  for(const id in cs)if(!A.find(a=>a.id===id)){sc.remove(cs[id].g);delete cs[id]}
+  if(S.yt_key&&S.yt_channel){
+    const a={id:'yt',name:'YT Manager',status:YE?'error':'active'};let c=cs.yt;
+    if(!c){c=cs.yt=mk(a);c.g.position.set(0,0,-5.9);c.v='work';c.k='w'}
+    label(c,a);
+  }else if(cs.yt){sc.remove(cs.yt.g);delete cs.yt}
+  for(const id in cs)if(id!=='yt'&&!A.find(a=>a.id===id)){sc.remove(cs[id].g);delete cs[id]}
   screens.forEach((s,i)=>s.material.color.set(A[i]&&vis(A[i])==='work'?0x66ffcc:0x222));
 }
 let mode=0;
@@ -275,8 +344,8 @@ R.domElement.addEventListener('wheel',e=>{e.preventDefault();dist=Math.max(14,Ma
 /* ---------- Timer (Worker agar tidak ikut dibatasi saat tab di latar belakang) ---------- */
 let sec=0;
 const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),1000)'])));
-w.onmessage=()=>{sec++;if(sec%Math.max(20,+S.interval||60)===0)tick()};
-load().then(tick);
+w.onmessage=()=>{sec++;if(sec%Math.max(20,+S.interval||60)===0)tick();if(sec%300===0)ytTick()};
+load().then(()=>{tick();ytTick()});
 </script>
 </body>
 </html>
