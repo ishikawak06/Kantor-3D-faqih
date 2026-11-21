@@ -63,7 +63,7 @@ button:hover{filter:brightness(1.1)}button:focus-visible,input:focus-visible,sel
 <h2>Manager (Gemini)</h2>
 <input id="gk" type="password" placeholder="Gemini API key">
 <div class="row"><input id="iv" type="number" min="20" placeholder="Interval cek (detik)"><button id="sv">Simpan</button></div>
-<div class="row"><button id="now">Cek sekarang</button><button id="wl">Jaga layar menyala</button></div>
+<div class="row"><button id="now" title="Mengirim 1 pesan tes ke setiap agen">Tes semua agen</button><button id="wl">Jaga layar menyala</button></div>
 <div id="lg"></div>
 </aside>
 
@@ -96,23 +96,28 @@ async function claude(a,content,max){
   const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'x-api-key':a.api_key,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:a.model,max_tokens:max,messages:[{role:'user',content}]})});
   return{r,j:await r.json().catch(()=>({}))};
 }
+function classify(r,j){
+  const m=j.error?.message||'';
+  if(r.ok)return{st:'active',reset:null,err:null};
+  if(r.status===401)return{st:'invalid',reset:null,err:m||'API key ditolak'};
+  if(r.status===429||/limit|quota|credit|exceeded/i.test(m)){const ra=+r.headers.get('retry-after');return{st:'limited',reset:new Date(Date.now()+(ra?ra*1000:3600e3)).toISOString(),err:m||'Jatah pesan habis'}}
+  return{st:'error',reset:null,err:m||('HTTP '+r.status)};
+}
+async function setStatus(a,c){
+  if(c.st!==a.status)log(`${a.name}: ${a.status} → ${c.st}`);
+  await patch('agents',a.id,{status:c.st,reset_at:c.reset,last_check:new Date().toISOString(),error:c.err});
+}
 async function check(a){
-  let st='active',reset=null,err=null;
-  try{
-    const{r,j}=await claude(a,'hi',1),m=j.error?.message||'';
-    if(r.status===429||/credit|usage limit/i.test(m)){st='limited';const ra=+r.headers.get('retry-after');reset=new Date(Date.now()+(ra?ra*1000:3600e3)).toISOString();err=m||'Kena rate limit'}
-    else if(r.status===401||r.status===403){st='invalid';err=m||'API key ditolak'}
-    else if(!r.ok){st='error';err=m||('HTTP '+r.status)}
-  }catch(e){st='error';err=String(e)}
-  if(st!==a.status)log(`${a.name}: ${a.status} → ${st}`);
-  await patch('agents',a.id,{status:st,reset_at:reset,last_check:new Date().toISOString(),error:err});
+  try{const{r,j}=await claude(a,'hi',1);await setStatus(a,classify(r,j))}
+  catch(e){await setStatus(a,{st:'error',reset:null,err:String(e)})}
 }
 async function run(a,t){
   try{
     const{r,j}=await claude(a,t.title,700);
     if(r.ok){await patch('tasks',t.id,{status:'done',result:j.content?.[0]?.text||''});log(`${a.name} selesai: ${t.title}`);return}
-  }catch(e){}
-  await patch('tasks',t.id,{status:'pending',agent_id:null});await check(a);
+    await setStatus(a,classify(r,j));
+  }catch(e){await setStatus(a,{st:'error',reset:null,err:String(e)})}
+  await patch('tasks',t.id,{status:'pending',agent_id:null});
 }
 
 /* ---------- Manager (Gemini) ---------- */
@@ -122,11 +127,11 @@ async function gemini(prompt){
 }
 const vis=a=>['limited','invalid','error'].includes(a.status)?'sleep':T.some(t=>t.agent_id===a.id&&t.status==='running')?'work':'idle';
 let busy=false,lastHash='';
-async function tick(){
+async function tick(force){
   if(busy)return;busy=true;
   try{
     await load();
-    for(const a of A){if(a.status==='limited'&&a.reset_at&&new Date(a.reset_at)>new Date())continue;await check(a)}
+    for(const a of A){const due=a.status==='unknown'||(a.status==='limited'&&(!a.reset_at||new Date(a.reset_at)<=new Date()));if(force||due)await check(a)}
     await load();
     const free=A.filter(a=>a.status==='active'&&vis(a)==='idle'),pend=T.filter(t=>t.status==='pending');
     const hash=A.map(a=>a.id+a.status).join();let asg=[];
@@ -177,7 +182,7 @@ $('#sv').onclick=async()=>{
   await db('settings?on_conflict=key',{method:'POST',headers:{Prefer:'resolution=merge-duplicates'},body:JSON.stringify([{key:'gemini_key',value:$('#gk').value.trim()},{key:'interval',value:String(Math.max(20,+$('#iv').value||60))}])});
   await load();
 };
-$('#now').onclick=tick;
+$('#now').onclick=()=>tick(true);
 $('#wl').onclick=async()=>{try{window._wl=await navigator.wakeLock.request('screen');$('#wl').textContent='Layar dijaga menyala'}catch(e){$('#wl').textContent='Tidak didukung'}};
 
 /* ---------- Kantor 3D ---------- */
