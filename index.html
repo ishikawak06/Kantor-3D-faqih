@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kantor Agen Claude</title>
+<!--
+JALANKAN SQL INI SEKALI DI SUPABASE (SQL Editor):
+
+create table agents(id uuid primary key default gen_random_uuid(), name text, api_key text, model text default 'claude-haiku-5-5', status text default 'unknown', reset_at timestamptz, last_check timestamptz, error text, created_at timestamptz default now());
+create table tasks(id uuid primary key default gen_random_uuid(), title text, status text default 'pending', agent_id uuid, result text, created_at timestamptz default now());
+create table settings(key text primary key, value text);
+create table logs(id bigserial primary key, msg text, created_at timestamptz default now());
+alter table agents enable row level security; alter table tasks enable row level security; alter table settings enable row level security; alter table logs enable row level security;
+create policy "open" on agents for all using (true) with check (true);
+create policy "open" on tasks for all using (true) with check (true);
+create policy "open" on settings for all using (true) with check (true);
+create policy "open" on logs for all using (true) with check (true);
+
+PERINGATAN: policy "open" membuat siapa pun yang punya URL halaman ini bisa membaca API key di tabel agents. Pakai repo private / Supabase Auth sebelum dipakai serius.
+-->
+<style>
+:root{--bg:#dfe7ee;--pn:#f3f5f8;--ink:#1d2433;--mu:#5f6b82;--ac:#2f5bea;--ln:#d3d9e3;--wk:#1f9d6b;--id:#e0a21b;--sl:#7a6bd8;--er:#d64545}
+*{box-sizing:border-box}
+body{margin:0;display:flex;height:100vh;height:100dvh;overflow:hidden;font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
+#c{flex:1;position:relative;min-width:0;touch-action:none}
+#c canvas{display:block;width:100%;height:100%}
+#v{position:absolute;left:12px;top:12px;display:flex;gap:6px}
+#v button{background:#fff;color:var(--ink);border:1px solid var(--ln)}
+#v button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+#p{width:350px;background:var(--pn);border-left:1px solid var(--ln);overflow:auto;padding:14px}
+h1{font-size:18px;margin:0 0 2px}h2{font-size:13px;margin:18px 0 8px;color:var(--mu);font-weight:600}
+#sum{color:var(--mu);font-size:13px}
+input,select,button{font:inherit;padding:7px 9px;border-radius:6px;border:1px solid var(--ln);background:#fff;color:var(--ink);width:100%;margin-bottom:6px}
+button{width:auto;background:var(--ac);color:#fff;border-color:var(--ac);cursor:pointer;margin-bottom:0}
+button:hover{filter:brightness(1.1)}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--ac);outline-offset:1px}
+.r{display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--ln)}
+.r i{width:10px;height:10px;border-radius:50%;margin-top:5px;flex:none}
+.r div{flex:1;min-width:0}.r small{display:block;color:var(--mu);overflow-wrap:anywhere}
+.r button{background:none;color:var(--mu);border:0;padding:2px 6px}
+.row{display:flex;gap:6px}.row>*{flex:1}.row button{flex:none}
+#lg{font-size:12px;color:var(--mu)}#lg div{padding:3px 0;border-bottom:1px dashed var(--ln)}
+#st{font-size:12px;color:var(--er);min-height:16px}
+@media(max-width:760px){body{flex-direction:column}#p{width:100%;height:46%;border-left:0;border-top:1px solid var(--ln)}}
+</style>
+</head>
+<body>
+<div id="c"><div id="v"><button data-m="0" class="on">Semua</button><button data-m="1">Lantai 1</button><button data-m="2">Lantai 2</button></div></div>
+<aside id="p">
+<h1>Kantor Agen Claude</h1>
+<div id="sum">Memuat...</div><div id="st"></div>
+
+<h2>Agen</h2>
+<div id="al"></div>
+<input id="an" placeholder="Nama agen, mis. Budi">
+<input id="ak" type="password" placeholder="Claude API key (sk-ant-...)">
+<div class="row"><select id="am"><option>claude-haiku-5-5</option><option>claude-sonnet-5-5</option><option>claude-opus-5-5</option></select><button id="aa">Tambah agen</button></div>
+
+<h2>Tugas</h2>
+<div id="tl"></div>
+<div class="row"><input id="tt" placeholder="Tulis tugas untuk agen"><button id="ta">Tambah</button></div>
+
+<h2>Manager (Gemini)</h2>
+<input id="gk" type="password" placeholder="Gemini API key">
+<div class="row"><input id="iv" type="number" min="20" placeholder="Interval cek (detik)"><button id="sv">Simpan</button></div>
+<div class="row"><button id="now">Cek sekarang</button><button id="wl">Jaga layar menyala</button></div>
+<div id="lg"></div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const SB='https://oifinnbsptccqmadhsls.supabase.co',KEY='sb_publishable_w3WYP20WV2Oqy15qW_rQHw_-Hc9y3sz';
+const GEM='gemini-2.5-flash';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let A=[],T=[],S={},L=[];
+
+/* ---------- Supabase (REST) ---------- */
+async function db(path,o={}){
+  const r=await fetch(SB+'/rest/v1/'+path,{...o,headers:{apikey:KEY,'Content-Type':'application/json',Prefer:'return=representation',...o.headers}});
+  if(!r.ok)throw new Error(await r.text());
+  return r.status===204?null:r.json();
+}
+const patch=(t,id,b)=>db(`${t}?id=eq.${id}`,{method:'PATCH',body:JSON.stringify(b)});
+const log=m=>db('logs',{method:'POST',body:JSON.stringify({msg:m})}).catch(()=>{});
+async function load(){
+  try{
+    let s;[A,T,L,s]=await Promise.all([db('agents?select=*&order=created_at'),db('tasks?select=*&order=created_at.desc&limit=30'),db('logs?select=*&order=id.desc&limit=10'),db('settings?select=*')]);
+    S=Object.fromEntries(s.map(x=>[x.key,x.value]));$('#st').textContent='';
+  }catch(e){$('#st').textContent='Database belum siap: jalankan SQL di komentar atas file ini. '+String(e.message).slice(0,90);return}
+  render();sync();
+}
+
+/* ---------- Claude ---------- */
+async function claude(a,content,max){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'x-api-key':a.api_key,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:a.model,max_tokens:max,messages:[{role:'user',content}]})});
+  return{r,j:await r.json().catch(()=>({}))};
+}
+async function check(a){
+  let st='active',reset=null,err=null;
+  try{
+    const{r,j}=await claude(a,'hi',1),m=j.error?.message||'';
+    if(r.status===429||/credit|usage limit/i.test(m)){st='limited';const ra=+r.headers.get('retry-after');reset=new Date(Date.now()+(ra?ra*1000:3600e3)).toISOString();err=m||'Kena rate limit'}
+    else if(r.status===401||r.status===403){st='invalid';err=m||'API key ditolak'}
+    else if(!r.ok){st='error';err=m||('HTTP '+r.status)}
+  }catch(e){st='error';err=String(e)}
+  if(st!==a.status)log(`${a.name}: ${a.status} → ${st}`);
+  await patch('agents',a.id,{status:st,reset_at:reset,last_check:new Date().toISOString(),error:err});
+}
+async function run(a,t){
+  try{
+    const{r,j}=await claude(a,t.title,700);
+    if(r.ok){await patch('tasks',t.id,{status:'done',result:j.content?.[0]?.text||''});log(`${a.name} selesai: ${t.title}`);return}
+  }catch(e){}
+  await patch('tasks',t.id,{status:'pending',agent_id:null});await check(a);
+}
+
+/* ---------- Manager (Gemini) ---------- */
+async function gemini(prompt){
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEM}:generateContent?key=${S.gemini_key}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json'}})});
+  const j=await r.json();return JSON.parse(j.candidates[0].content.parts[0].text);
+}
+const vis=a=>['limited','invalid','error'].includes(a.status)?'sleep':T.some(t=>t.agent_id===a.id&&t.status==='running')?'work':'idle';
+let busy=false,lastHash='';
+async function tick(){
+  if(busy)return;busy=true;
+  try{
+    await load();
+    for(const a of A){if(a.status==='limited'&&a.reset_at&&new Date(a.reset_at)>new Date())continue;await check(a)}
+    await load();
+    const free=A.filter(a=>a.status==='active'&&vis(a)==='idle'),pend=T.filter(t=>t.status==='pending');
+    const hash=A.map(a=>a.id+a.status).join();let asg=[];
+    if(S.gemini_key&&((pend.length&&free.length)||hash!==lastHash)){
+      try{
+        const o=await gemini(`Kamu manager kantor AI. Agen: ${JSON.stringify(A.map(a=>({id:a.id,nama:a.name,status:a.status,sibuk:vis(a)==='work'})))}. Tugas pending: ${JSON.stringify(pend.map(t=>({id:t.id,judul:t.title})))}. Tugaskan tiap tugas ke agen berstatus active yang tidak sibuk, maksimal satu tugas per agen. Balas JSON: {"assignments":[{"task_id":"","agent_id":""}],"comment":"satu kalimat laporan singkat bahasa Indonesia"}`);
+        asg=o.assignments||[];if(o.comment)log('Manager: '+o.comment);
+      }catch(e){log('Manager Gemini gagal: '+String(e).slice(0,80))}
+    }
+    lastHash=hash;
+    if(!asg.length&&!S.gemini_key)asg=pend.slice(0,free.length).map((t,i)=>({task_id:t.id,agent_id:free[i].id}));
+    const used=new Set(),jobs=[];
+    for(const x of asg){
+      const a=free.find(f=>f.id===x.agent_id),t=pend.find(p=>p.id===x.task_id);
+      if(!a||!t||used.has(a.id))continue;used.add(a.id);
+      await patch('tasks',t.id,{status:'running',agent_id:a.id});log(`${a.name} mulai: ${t.title}`);jobs.push(run(a,t));
+    }
+    await load();await Promise.all(jobs);await load();
+  }finally{busy=false}
+}
+
+/* ---------- Panel ---------- */
+const CL={active:'#1f9d6b',limited:'#7a6bd8',invalid:'#d64545',error:'#d64545',unknown:'#999'},LB={work:'bekerja',idle:'santai',sleep:'tidur'};
+function render(){
+  const n=v=>A.filter(a=>vis(a)===v).length;
+  $('#sum').textContent=`${A.length} agen: ${n('work')} bekerja, ${n('idle')} santai, ${n('sleep')} tidur`;
+  $('#al').innerHTML=A.map(a=>`<div class="r"><i style="background:${CL[a.status]||'#999'}"></i><div><b>${esc(a.name)}</b><small>${esc(a.model)}, ${LB[vis(a)]}${a.status==='limited'&&a.reset_at?', pulih '+new Date(a.reset_at).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}):''}${a.error&&a.status!=='active'?'<br>'+esc(a.error.slice(0,90)):''}</small></div><button data-d="${a.id}" title="Hapus agen">✕</button></div>`).join('')||'<small>Belum ada agen. Tambahkan API key Claude di bawah.</small>';
+  $('#tl').innerHTML=T.slice(0,8).map(t=>`<div class="r"><i style="background:${t.status==='done'?'#1f9d6b':t.status==='running'?'#e0a21b':'#999'}"></i><div><b>${esc(t.title)}</b><small>${t.status}${t.result?': '+esc(t.result.slice(0,110)):''}</small></div><button data-t="${t.id}" title="Hapus tugas">✕</button></div>`).join('')||'<small>Belum ada tugas. Agen tanpa tugas akan bersantai di lantai 2.</small>';
+  $('#lg').innerHTML=L.map(l=>`<div>${new Date(l.created_at).toLocaleTimeString('id-ID')} ${esc(l.msg)}</div>`).join('');
+  if(document.activeElement!==$('#gk'))$('#gk').value=S.gemini_key||'';
+  if(document.activeElement!==$('#iv'))$('#iv').value=S.interval||60;
+}
+$('#p').addEventListener('click',async e=>{
+  const d=e.target.dataset;
+  if(d.d&&confirm('Hapus agen ini?')){await db('agents?id=eq.'+d.d,{method:'DELETE'});await load()}
+  if(d.t){await db('tasks?id=eq.'+d.t,{method:'DELETE'});await load()}
+});
+$('#aa').onclick=async()=>{
+  if(!$('#an').value||!$('#ak').value)return;
+  await db('agents',{method:'POST',body:JSON.stringify({name:$('#an').value.trim(),api_key:$('#ak').value.trim(),model:$('#am').value})});
+  $('#an').value=$('#ak').value='';await load();tick();
+};
+$('#ta').onclick=async()=>{
+  if(!$('#tt').value.trim())return;
+  await db('tasks',{method:'POST',body:JSON.stringify({title:$('#tt').value.trim()})});$('#tt').value='';await load();tick();
+};
+$('#sv').onclick=async()=>{
+  await db('settings?on_conflict=key',{method:'POST',headers:{Prefer:'resolution=merge-duplicates'},body:JSON.stringify([{key:'gemini_key',value:$('#gk').value.trim()},{key:'interval',value:String(Math.max(20,+$('#iv').value||60))}])});
+  await load();
+};
+$('#now').onclick=tick;
+$('#wl').onclick=async()=>{try{window._wl=await navigator.wakeLock.request('screen');$('#wl').textContent='Layar dijaga menyala'}catch(e){$('#wl').textContent='Tidak didukung'}};
+
+/* ---------- Kantor 3D ---------- */
+const H=5,box=(g,w,h,d,c,x,y,z)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),new THREE.MeshLambertMaterial({color:c}));m.position.set(x,y,z);g.add(m);return m};
+const host=$('#c'),R=new THREE.WebGLRenderer({antialias:true});R.setPixelRatio(Math.min(devicePixelRatio,2));host.appendChild(R.domElement);
+const sc=new THREE.Scene();sc.background=new THREE.Color(0xdfe7ee);
+const cam=new THREE.PerspectiveCamera(50,1,.1,200);
+let az=.35,el=.7,dist=36;
+const camSet=()=>{cam.position.set(dist*Math.sin(az)*Math.cos(el),dist*Math.sin(el)+H/2,dist*Math.cos(az)*Math.cos(el));cam.lookAt(0,H/2,0)};
+sc.add(new THREE.AmbientLight(0xffffff,.75));const dl=new THREE.DirectionalLight(0xffffff,.6);dl.position.set(10,30,20);sc.add(dl);
+const F1=new THREE.Group(),F2=new THREE.Group();F2.position.y=H;sc.add(F1,F2);
+for(const[g,c]of[[F1,0xc9d3e3],[F2,0xe6dccb]]){box(g,26,.3,16,c,0,-.15,0);box(g,26,3,.3,0xf4f6fa,0,1.5,-8)}
+const desks=[],screens=[];
+for(let i=0;i<8;i++){const x=-9+(i%4)*6,z=i<4?-3.5:3;desks.push({x,z:z+1.5});
+  box(F1,3,.2,1.4,0x9a7b5a,x,1.1,z);box(F1,.2,1,.2,0x7a5f44,x-1.3,.55,z);box(F1,.2,1,.2,0x7a5f44,x+1.3,.55,z);
+  box(F1,1.4,.9,.1,0x222,x,1.8,z-.3);
+  const s=new THREE.Mesh(new THREE.PlaneGeometry(1.2,.7),new THREE.MeshBasicMaterial({color:0x222}));s.position.set(x,1.8,z-.24);F1.add(s);screens.push(s)}
+box(F2,5,.8,1.4,0xb05a7a,-8,.4,5);box(F2,5,.9,.4,0xa04d6c,-8,.9,5.6);box(F2,4,2,.2,0x222,-8,1.8,-7.5);box(F2,3.6,1.7,.05,0x3b6fd8,-8,1.8,-7.38);box(F2,2,.5,1,0x9a7b5a,-8,.25,1.5);
+for(let i=0;i<8;i++){const x=1.5+(i%4)*2.3,z=i<4?-3.8:3.5;box(F2,1.8,.5,3.6,0xf4f4f8,x,.25,z);box(F2,1.4,.2,.6,0xbcd,x,.6,z-1.4)}
+const stair=box(sc,2,.3,Math.sqrt(144+H*H),0x8896b3,11.8,H/2,0);stair.rotation.x=Math.atan(H/12);
+const spot={work:i=>new THREE.Vector3(desks[i%8].x,0,desks[i%8].z),idle:i=>new THREE.Vector3(-11+(i%4)*2.4,H,i%8<4?-2.5:.5),sleep:i=>new THREE.Vector3(1.5+(i%4)*2.3,H+.5,(i%8)<4?-3.8:3.5)};
+const SBOT=new THREE.Vector3(11.8,0,6.5),STOP=new THREE.Vector3(11.8,H,-6.3);
+const mat=c=>new THREE.MeshLambertMaterial({color:c});
+function sprite(w,h,sx,sy){const cv=document.createElement('canvas');cv.width=w;cv.height=h;const tex=new THREE.CanvasTexture(cv);const s=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false}));s.scale.set(sx,sy,1);return{s,cv,tex}}
+const hs=s=>[...s].reduce((h,c)=>(h*31+c.charCodeAt(0))|0,7);
+const cs={};
+function mk(a){
+  const g=new THREE.Group(),m=new THREE.Group(),col=new THREE.Color().setHSL(Math.abs(hs(a.id))%360/360,.55,.55);
+  const body=new THREE.Mesh(new THREE.CylinderGeometry(.35,.4,1,12),mat(col));body.position.y=.9;
+  const head=new THREE.Mesh(new THREE.SphereGeometry(.32,16,12),mat(0xf2c9a0));head.position.y=1.7;
+  const arms=[-1,1].map(s=>{const p=new THREE.Group();p.position.set(s*.5,1.3,0);const b=new THREE.Mesh(new THREE.BoxGeometry(.18,.7,.18),mat(col));b.position.y=-.3;p.add(b);m.add(p);return p});
+  const legs=[-1,1].map(s=>{const b=new THREE.Mesh(new THREE.BoxGeometry(.22,.5,.22),mat(0x33405c));b.position.set(s*.2,.25,0);m.add(b)});
+  m.add(body,head);g.add(m);
+  const lb=sprite(256,64,3.2,.8);lb.s.position.y=2.7;g.add(lb.s);
+  const z=sprite(128,64,1.4,.7);z.s.position.set(.6,2.2,0);const x=z.cv.getContext('2d');x.fillStyle='#4a3fb0';x.font='bold 44px sans-serif';x.fillText('Zzz',10,46);z.tex.needsUpdate=true;g.add(z.s);
+  sc.add(g);return{g,m,arms,lb,z,path:[],v:null,o:Math.random()*6}
+}
+function label(c,a){
+  const x=c.lb.cv.getContext('2d');x.clearRect(0,0,256,64);x.fillStyle='rgba(255,255,255,.92)';x.fillRect(0,10,256,44);
+  x.fillStyle=CL[a.status]||'#999';x.beginPath();x.arc(22,32,9,0,7);x.fill();x.fillStyle='#1d2433';x.font='bold 24px sans-serif';x.fillText(a.name.slice(0,14),42,41);c.lb.tex.needsUpdate=true;
+}
+function sync(){
+  A.forEach((a,i)=>{
+    let c=cs[a.id];const v=vis(a),tgt=spot[v](i);
+    if(!c){c=cs[a.id]=mk(a);c.g.position.copy(tgt);c.v=v;c.k=v+i}
+    label(c,a);
+    if(c.k!==v+i){
+      c.k=v+i;c.v=v;const up=c.g.position.y>H/2,want=tgt.y>H/2,p=[];
+      if(up&&!want)p.push(STOP.clone(),SBOT.clone());
+      if(!up&&want)p.push(SBOT.clone(),STOP.clone());
+      p.push(tgt);c.path=p;
+    }
+  });
+  for(const id in cs)if(!A.find(a=>a.id===id)){sc.remove(cs[id].g);delete cs[id]}
+  screens.forEach((s,i)=>s.material.color.set(A[i]&&vis(A[i])==='work'?0x66ffcc:0x222));
+}
+let mode=0;
+document.querySelectorAll('#v button').forEach(b=>b.onclick=()=>{mode=+b.dataset.m;document.querySelectorAll('#v button').forEach(x=>x.classList.toggle('on',x===b))});
+const clock=new THREE.Clock();
+function frame(){
+  requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.1),t=clock.elapsedTime;
+  F1.visible=mode!==2;F2.visible=mode!==1;
+  for(const id in cs){
+    const c=cs[id],g=c.g,wp=c.path[0];
+    g.visible=mode===0||(mode===1&&g.position.y<H/2)||(mode===2&&g.position.y>=H/2);
+    const walking=!!wp;c.z.s.visible=false;
+    if(walking){
+      const d=wp.clone().sub(g.position),l=d.length();
+      if(l<.1)c.path.shift();else{g.rotation.y=Math.atan2(d.x,d.z);d.multiplyScalar(Math.min(dt*4,l)/l);g.position.add(d)}
+      c.m.rotation.x=0;c.m.position.set(0,Math.abs(Math.sin(t*10))*.1,0);c.arms.forEach((a,i)=>a.rotation.x=Math.sin(t*10+i*3)*.6);
+    }else if(c.v==='work'){
+      g.rotation.y=Math.PI;c.m.rotation.x=0;c.m.position.set(0,-.3,0);c.arms.forEach((a,i)=>a.rotation.x=-1.1+Math.sin(t*14+i*2+c.o)*.25);
+    }else if(c.v==='idle'){
+      g.rotation.y+=dt*2.5;c.m.rotation.x=0;c.m.position.set(0,Math.abs(Math.sin(t*5+c.o))*.3,0);c.arms.forEach((a,i)=>{a.rotation.x=0;a.rotation.z=(i?1:-1)*(1.2+Math.sin(t*6+c.o)*.5)});
+    }else{
+      g.rotation.y=0;c.m.rotation.x=-Math.PI/2;c.m.position.set(0,.4,1);c.arms.forEach(a=>{a.rotation.x=0;a.rotation.z=0});c.z.s.visible=true;c.z.s.position.y=2.2+Math.sin(t*2)*.15;
+    }
+    if(walking||c.v==='work')c.arms.forEach(a=>a.rotation.z=0);
+  }
+  camSet();R.render(sc,cam);
+}
+function size(){R.setSize(host.clientWidth,host.clientHeight);cam.aspect=host.clientWidth/host.clientHeight;cam.updateProjectionMatrix()}
+addEventListener('resize',size);size();frame();
+let drag=null;
+R.domElement.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY]});
+addEventListener('pointerup',()=>drag=null);
+addEventListener('pointermove',e=>{if(!drag)return;az-=(e.clientX-drag[0])*.007;el=Math.max(.1,Math.min(1.4,el+(e.clientY-drag[1])*.005));drag=[e.clientX,e.clientY]});
+R.domElement.addEventListener('wheel',e=>{e.preventDefault();dist=Math.max(14,Math.min(60,dist+e.deltaY*.03))},{passive:false});
+
+/* ---------- Timer (Worker agar tidak ikut dibatasi saat tab di latar belakang) ---------- */
+let sec=0;
+const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),1000)'])));
+w.onmessage=()=>{sec++;if(sec%Math.max(20,+S.interval||60)===0)tick()};
+load().then(tick);
+</script>
+</body>
+</html>
